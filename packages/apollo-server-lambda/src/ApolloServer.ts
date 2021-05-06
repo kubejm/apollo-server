@@ -10,10 +10,6 @@ import {
   runHttpQuery,
   HttpQueryError,
 } from 'apollo-server-core';
-import {
-  renderPlaygroundPage,
-  RenderPageOptions as PlaygroundRenderPageOptions,
-} from '@apollographql/graphql-playground-html';
 
 import { Headers } from 'apollo-server-env';
 
@@ -203,18 +199,13 @@ export class ApolloServer<
         };
       }
 
-      if (this.playgroundOptions && eventHttpMethod(event) === 'GET') {
+      if (eventHttpMethod(event) === 'GET') {
         const acceptHeader = event.headers['Accept'] || event.headers['accept'];
         if (acceptHeader && acceptHeader.includes('text/html')) {
-          const path = eventPath(event) || '/';
-
-          const playgroundRenderPageOptions: PlaygroundRenderPageOptions = {
-            endpoint: path,
-            ...this.playgroundOptions,
-          };
+          // const path = eventPath(event) || '/';
 
           return {
-            body: renderPlaygroundPage(playgroundRenderPageOptions),
+            body: 'FIXME lambda',
             statusCode: 200,
             headers: {
               'Content-Type': 'text/html',
