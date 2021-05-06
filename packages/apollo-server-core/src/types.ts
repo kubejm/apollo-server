@@ -72,7 +72,7 @@ type BaseConfig = Pick<
 >;
 
 export type Unsubscriber = () => void;
-export type SchemaChangeCallback = (schema: GraphQLSchema) => void;
+export type SchemaChangeCallback = (schema: GraphQLSchema, schemaSdl: string) => void;
 
 export type GraphQLServiceConfig = {
   schema: GraphQLSchema;
