@@ -16,6 +16,7 @@ import {
   GraphQLRequestContextResponseForOperation,
   GraphQLRequestContextExecutionDidStart,
   GraphQLRequestContextWillSendResponse,
+  GraphQLSchemaContext,
 } from 'apollo-server-types';
 
 // We re-export all of these so plugin authors only need to depend on a single
@@ -43,6 +44,7 @@ export {
   GraphQLRequestContextResponseForOperation,
   GraphQLRequestContextExecutionDidStart,
   GraphQLRequestContextWillSendResponse,
+  GraphQLSchemaContext,
 };
 
 // Typings Note! (Fix in AS3?)
@@ -65,6 +67,9 @@ export interface ApolloServerPlugin<
 }
 
 export interface GraphQLServerListener {
+  schemaDidChange?(
+    schemaContext: GraphQLSchemaContext,
+  ): void;
   serverWillStop?(): ValueOrPromise<void>;
 }
 

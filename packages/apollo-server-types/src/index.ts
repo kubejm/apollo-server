@@ -84,6 +84,11 @@ export interface ApolloConfig {
   };
 }
 
+export interface GraphQLSchemaContext {
+  apiSchema: GraphQLSchema,
+  coreSchemaSdl?: string,
+}
+
 export interface GraphQLRequest {
   query?: string;
   operationName?: string;
