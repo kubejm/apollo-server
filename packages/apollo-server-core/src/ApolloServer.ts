@@ -51,6 +51,7 @@ import {
   FileUploadOptions,
   PluginDefinition,
   GraphQLService,
+  Unsubscriber,
 } from './types';
 
 import { gql } from './index';
@@ -515,6 +516,22 @@ export class ApolloServerBase {
     this.state = { phase: 'starting', barrier };
     let loadedSchema = false;
     try {
+      // Because serverWillStart() can be async, it's possible that the gateway's schema may update
+      // while that callback is executing. If that occurs, the schema passed to the callback will
+      // be out-of-date. In order for the schemaDidChange() callback to properly notified of such a
+      // new schema, we add a listener here to track it.
+      let latestApiSchema: GraphQLSchema | undefined;
+      let latestCoreSchemaSdl: string | undefined;
+      let maybeGateway: GraphQLService | undefined;
+      let maybeUnsubscribe: Unsubscriber | undefined;
+      if (initialState.phase === 'initialized with gateway') {
+        maybeGateway = initialState.gateway;
+        maybeUnsubscribe = maybeGateway.onSchemaChange((apiSchema, coreSchemaSdl) => {
+          latestApiSchema = apiSchema;
+          latestCoreSchemaSdl = coreSchemaSdl;
+        });
+      }
+
       const schemaDerivedData =
         initialState.phase === 'initialized with schema'
           ? initialState.schemaDerivedData
@@ -563,15 +580,45 @@ export class ApolloServerBase {
         )
       ).filter(
         (maybeServerListener): maybeServerListener is GraphQLServerListener =>
-          typeof maybeServerListener === 'object' &&
-          !!maybeServerListener.serverWillStop,
+          typeof maybeServerListener === 'object'
       );
-      this.toDispose.add(async () => {
-        await Promise.all(
-          serverListeners.map(({ serverWillStop }) => serverWillStop?.()),
-        );
+
+      serverListeners.forEach(({ schemaDidChange, serverWillStop }) => {
+        let unsubscribe: Unsubscriber | undefined;
+        if (schemaDidChange) {
+          if (maybeGateway) {
+            // Note that latestApiSchema should have been set at least once by now, specifically
+            // during the call to gateway.load().
+            if (!latestApiSchema) {
+              throw new Error(`Gateway did not notify listeners when loading schema.`);
+            }
+            // Note that it's important for there to be no await between this schemaDidChange()
+            // invocation and the registration of the new schema change callback, otherwise plugins
+            // could miss schema changes.
+            schemaDidChange({
+              apiSchema: latestApiSchema,
+              coreSchemaSdl: latestCoreSchemaSdl,
+            });
+            unsubscribe = maybeGateway.onSchemaChange((apiSchema, coreSchemaSdl) => {
+              schemaDidChange({ apiSchema, coreSchemaSdl })
+            });
+          } else {
+            schemaDidChange({ apiSchema: schemaDerivedData.schema });
+          }
+        }
+
+        // We'd like to not call schemaDidChange() after serverWillStop() runs, in the event the
+        // plugin runs any cleanup tasks in serverWillStop(). So we make sure to call unsubscribe()
+        // before calling serverWillStop() instead of adding them separately to this.toDispose.
+        if (unsubscribe || serverWillStop) {
+          this.toDispose.add(async () => {
+            unsubscribe?.();
+            serverWillStop?.();
+          });
+        }
       });
 
+      maybeUnsubscribe?.();
       this.state = { phase: 'started', schemaDerivedData };
     } catch (error) {
       this.state = { phase: 'failed to start', error, loadedSchema };
