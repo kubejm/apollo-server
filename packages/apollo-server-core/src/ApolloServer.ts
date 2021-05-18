@@ -146,6 +146,7 @@ class UnreachableCaseError extends Error {
     super(`Unreachable case: ${val}`);
   }
 }
+
 export class ApolloServerBase {
   private logger: Logger;
   public subscriptionsPath?: string;
@@ -526,10 +527,12 @@ export class ApolloServerBase {
       let maybeUnsubscribe: Unsubscriber | undefined;
       if (initialState.phase === 'initialized with gateway') {
         maybeGateway = initialState.gateway;
-        maybeUnsubscribe = maybeGateway.onSchemaChange((apiSchema, coreSchemaSdl) => {
-          latestApiSchema = apiSchema;
-          latestCoreSchemaSdl = coreSchemaSdl;
-        });
+        maybeUnsubscribe = maybeGateway.onSchemaChange(
+          (apiSchema, coreSchemaSdl) => {
+            latestApiSchema = apiSchema;
+            latestCoreSchemaSdl = coreSchemaSdl;
+          },
+        );
       }
 
       const schemaDerivedData =
@@ -580,7 +583,7 @@ export class ApolloServerBase {
         )
       ).filter(
         (maybeServerListener): maybeServerListener is GraphQLServerListener =>
-          typeof maybeServerListener === 'object'
+          typeof maybeServerListener === 'object',
       );
 
       serverListeners.forEach(({ schemaDidChange, serverWillStop }) => {
@@ -590,7 +593,9 @@ export class ApolloServerBase {
             // Note that latestApiSchema should have been set at least once by now, specifically
             // during the call to gateway.load().
             if (!latestApiSchema) {
-              throw new Error(`Gateway did not notify listeners when loading schema.`);
+              throw new Error(
+                `Gateway did not notify listeners when loading schema.`,
+              );
             }
             // Note that it's important for there to be no await between this schemaDidChange()
             // invocation and the registration of the new schema change callback, otherwise plugins
@@ -599,9 +604,11 @@ export class ApolloServerBase {
               apiSchema: latestApiSchema,
               coreSchemaSdl: latestCoreSchemaSdl,
             });
-            unsubscribe = maybeGateway.onSchemaChange((apiSchema, coreSchemaSdl) => {
-              schemaDidChange({ apiSchema, coreSchemaSdl })
-            });
+            unsubscribe = maybeGateway.onSchemaChange(
+              (apiSchema, coreSchemaSdl) => {
+                schemaDidChange({ apiSchema, coreSchemaSdl });
+              },
+            );
           } else {
             schemaDidChange({ apiSchema: schemaDerivedData.schema });
           }
@@ -1320,7 +1327,10 @@ export class ApolloServerBase {
    * `{req: express.Request, res: express.Response }` object) and to keep it
    * updated as you upgrade Apollo Server.
    */
-  public async executeOperation(request: GraphQLRequest, integrationContextArgument?: Record<string, any>) {
+  public async executeOperation(
+    request: GraphQLRequest,
+    integrationContextArgument?: Record<string, any>,
+  ) {
     const options = await this.graphQLServerOptions(integrationContextArgument);
 
     if (typeof options.context === 'function') {
