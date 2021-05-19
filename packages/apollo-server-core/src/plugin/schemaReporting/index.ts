@@ -5,7 +5,7 @@ import { printSchema, validateSchema, buildSchema } from 'graphql';
 import { SchemaReporter } from './schemaReporter';
 import createSHA from '../../utils/createSHA';
 import { schemaIsFederated } from '../schemaIsFederated';
-import { GraphQLService, Unsubscriber } from '../../types';
+import { EdgeServerInfo } from './reportingOperationTypes';
 
 export interface ApolloServerPluginSchemaReportingOptions {
   /**
@@ -49,14 +49,6 @@ export interface ApolloServerPluginSchemaReportingOptions {
    * Apollo use.
    */
   endpointUrl?: string;
-  /**
-   * To enable schema reporting for federated graphs, you must pass in your
-   * gateway instance. Note that overrideReportedSchema is incompatible with
-   * this option, as the schema SDL is given directly by gateway. If you would
-   * like to customize the schema SDL reported, please instead set the option
-   * experimental_updateSupergraphSdl in your gateway configuration.
-   */
-  experimental_gateway?: GraphQLService;
 }
 
 export function ApolloServerPluginSchemaReporting(
@@ -64,35 +56,9 @@ export function ApolloServerPluginSchemaReporting(
     initialDelayMaxMs,
     overrideReportedSchema,
     endpointUrl,
-    experimental_gateway,
   }: ApolloServerPluginSchemaReportingOptions = Object.create(null),
 ): InternalApolloServerPlugin {
   const bootId = uuidv4();
-
-  let currentSchemaSdl: string | undefined;
-  let currentSchemaReporter: SchemaReporter | undefined;
-  let gatewaySchemaChangeUnsubscriber: Unsubscriber | undefined;
-  if (experimental_gateway) {
-    gatewaySchemaChangeUnsubscriber = experimental_gateway.onSchemaChange(
-      (_, schemaSdl) => {
-        currentSchemaSdl = schemaSdl;
-        if (currentSchemaReporter) {
-          const options = currentSchemaReporter.toOptions();
-          currentSchemaReporter.stop();
-          const executableSchemaId = computeExecutableSchemaId(schemaSdl);
-          currentSchemaReporter = new SchemaReporter({
-            ...options,
-            schemaSdl,
-            serverInfo: {
-              ...options.serverInfo,
-              executableSchemaId,
-            },
-          });
-          currentSchemaReporter.start();
-        }
-      },
-    );
-  }
 
   return {
     __internal_plugin_id__() {
@@ -133,21 +99,9 @@ export function ApolloServerPluginSchemaReporting(
         }
       }
 
-      if (schemaIsFederated(schema)) {
-        if (!experimental_gateway) {
-          throw new Error(
-            [
-              `To use schema reporting with gateways, you must provide the`,
-              `gateway instance in the plugin options.`,
-            ].join(' '),
-          );
-        }
-      }
-
-      let executableSchemaSdl: string =
-        overrideReportedSchema ?? printSchema(schema);
-      if (experimental_gateway) {
-        if (overrideReportedSchema) {
+      const isFederatedSchemaReporting = schemaIsFederated(schema);
+      if (overrideReportedSchema !== undefined) {
+        if (isFederatedSchemaReporting) {
           throw new Error(
             [
               `The overrideReportedSchema option is incompatible with gateways`,
@@ -158,30 +112,6 @@ export function ApolloServerPluginSchemaReporting(
             ].join(' '),
           );
         }
-        if (currentSchemaSdl === undefined) {
-          throw new Error(
-            [
-              `Gateway unexpectedly did not set the SDL prior to Apollo Server`,
-              `running the serverWillStart hook.`,
-            ].join(' '),
-          );
-        }
-        executableSchemaSdl = currentSchemaSdl;
-        // NOTE: It is critical that there is no await between here and the
-        // start of the schema reporter. If there is, the currentSchemaSdl
-        // might be updated by the gateway, which would result in that update
-        // being lost, and the schema reporter would report the wrong schema.
-        //
-        // We could refactor SchemaReporter to contain this complexity, but
-        // when this was tried, this resulted in a fair amount of pain (e.g.
-        // due to TS not having nice facilities around late initialization, and
-        // due to new field mutability making the SchemaReporter more fragile/
-        // harder to reason about).
-      }
-
-      const executableSchemaId = computeExecutableSchemaId(executableSchemaSdl);
-
-      if (overrideReportedSchema !== undefined) {
         logger.info(
           'Apollo schema reporting: schema to report has been overridden',
         );
@@ -192,14 +122,13 @@ export function ApolloServerPluginSchemaReporting(
         );
       }
 
-      const serverInfo = {
+      const baseServerInfo: Omit<EdgeServerInfo, 'executableSchemaId'> = {
         bootId,
         graphVariant: apollo.graphVariant,
         // The infra environment in which this edge server is running, e.g. localhost, Kubernetes
         // Length must be <= 256 characters.
         platform: process.env.APOLLO_SERVER_PLATFORM || 'local',
         runtimeVersion: `node ${process.version}`,
-        executableSchemaId: executableSchemaId,
         // An identifier used to distinguish the version of the server code such as git or docker sha.
         // Length must be <= 256 charecters
         userVersion: process.env.APOLLO_SERVER_USER_VERSION,
@@ -210,35 +139,65 @@ export function ApolloServerPluginSchemaReporting(
           require('../../../package.json').version
         }`,
       };
-
-      logger.info(
-        'Apollo schema reporting starting! See your graph at ' +
-          `https://studio.apollographql.com/graph/${encodeURIComponent(
-            graphId,
-          )}/?variant=${encodeURIComponent(
-            apollo.graphVariant,
-          )} with server info ${JSON.stringify(serverInfo)}`,
-      );
-
-      currentSchemaReporter = new SchemaReporter({
-        serverInfo,
-        schemaSdl: executableSchemaSdl,
-        apiKey: key,
-        endpointUrl,
-        logger,
-        // Jitter the startup between 0 and 10 seconds
-        initialReportingDelayInMs: Math.floor(
-          Math.random() * (initialDelayMaxMs ?? 10_000),
-        ),
-        fallbackReportingDelayInMs: 20_000,
-      });
-      currentSchemaReporter.start();
+      let currentSchemaReporter: SchemaReporter | undefined;
 
       return {
-        async serverWillStop() {
-          if (gatewaySchemaChangeUnsubscriber) {
-            gatewaySchemaChangeUnsubscriber();
+        schemaDidChange({ apiSchema, coreSchemaSdl }): void {
+          if (currentSchemaReporter) {
+            currentSchemaReporter.stop();
           }
+
+          let executableSchemaSdl: string;
+          if (isFederatedSchemaReporting) {
+            if (coreSchemaSdl === undefined) {
+              // TODO: Once a gateway version providing the core schema to callbacks has been
+              //       released, update this message to state the specific version needed.
+              throw new Error(
+                [
+                  `Your version of gateway is too old for use in schema reporting. Please`,
+                  `update your gateway version to latest to use schema reporting.`,
+                ].join(' '),
+              );
+            } else {
+              // Recall from above that we ignore overrideReportedSchema for gateways.
+              executableSchemaSdl = coreSchemaSdl;
+            }
+          } else {
+            executableSchemaSdl =
+              overrideReportedSchema ?? printSchema(apiSchema);
+          }
+          const executableSchemaId = computeExecutableSchemaId(
+            executableSchemaSdl,
+          );
+          const serverInfo: EdgeServerInfo = {
+            ...baseServerInfo,
+            executableSchemaId,
+          };
+
+          currentSchemaReporter = new SchemaReporter({
+            serverInfo,
+            schemaSdl: executableSchemaSdl,
+            apiKey: key,
+            endpointUrl,
+            logger,
+            // Jitter the startup between 0 and 10 seconds
+            initialReportingDelayInMs: Math.floor(
+              Math.random() * (initialDelayMaxMs ?? 10_000),
+            ),
+            fallbackReportingDelayInMs: 20_000,
+          });
+          currentSchemaReporter.start();
+
+          logger.info(
+            'Apollo schema reporting: reporting a new schema to Studio! See your graph at ' +
+              `https://studio.apollographql.com/graph/${encodeURIComponent(
+                graphId,
+              )}/?variant=${encodeURIComponent(
+                apollo.graphVariant,
+              )} with server info ${JSON.stringify(serverInfo)}`,
+          );
+        },
+        async serverWillStop() {
           currentSchemaReporter?.stop();
         },
       };
